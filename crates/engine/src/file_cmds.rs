@@ -886,7 +886,8 @@ pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
         lattice.layers.push(a);
     }
     let out = photocraft_compose::flatten(&lattice);
-    let mut s = format!("TITLE \"{}\"\n# Created by Photocraft\nLUT_3D_SIZE {n}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n", title.replace('"', "'"));
+    let creator = photocraft_psd::resources::app_name().unwrap_or("Photocraft");
+    let mut s = format!("TITLE \"{}\"\n# Created by {creator}\nLUT_3D_SIZE {n}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n", title.replace('"', "'"));
     // .cube order: red changes fastest, then green, then blue.
     for b in 0..n {
         for g in 0..n {

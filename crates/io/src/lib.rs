@@ -125,6 +125,34 @@ pub fn import_with(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt)
     Ok(r)
 }
 
+/// [`import`] for untrusted input: every decoder runs under `limits`, checked on header and
+/// layer-record values before pixels are allocated. PSD/PSB files are refused when the
+/// canvas exceeds the width, height or pixel limit, or when decoding every layer channel and
+/// the merged image would exceed `max_alloc` ([`PsdFile::decoded_bytes`]). Native `.pcraft`
+/// bundles are refused: their loader takes no limits.
+pub fn import_with_limits(name: &str, bytes: &[u8], limits: &photocraft_codecs::Limits) -> Result<ImportResult, IoError> {
+    if has_extension(name, photocraft_format::EXTENSION) || photocraft_format::is_pcraft(bytes) {
+        return Err(IoError::Unsupported("native bundles are not opened under import limits".into()));
+    }
+    if is_psd(bytes) {
+        let file = PsdFile::from_bytes(bytes)?;
+        let h = &file.header;
+        if h.width > limits.max_width || h.height > limits.max_height || u64::from(h.width) * u64::from(h.height) > limits.max_pixels {
+            return Err(IoError::Psd(PsdError::LimitExceeded("canvas exceeds the import limits")));
+        }
+        if file.decoded_bytes()? > limits.max_alloc {
+            return Err(IoError::Psd(PsdError::LimitExceeded("decoded layer data exceeds the import limits")));
+        }
+        let (mut document, warnings) = psd_import::psd_to_document_with(&file, &photocraft_raster::Interrupt::NONE).ok_or(IoError::Cancelled)?;
+        document.name = name.to_string();
+        return Ok(ImportResult { document, warnings });
+    }
+    if raw::is_raw(bytes) {
+        return raw::import_raw_with(name, bytes, &photocraft_raw::DevelopOptions { limits: raw::raw_limits(limits), ..Default::default() });
+    }
+    flat::import_flat_with(name, bytes, limits)
+}
+
 fn import_stages(name: &str, bytes: &[u8], ctl: &photocraft_raster::Interrupt) -> Result<ImportResult, IoError> {
     // A declared native extension must reach its loader so malformed bundles retain format errors.
     if has_extension(name, photocraft_format::EXTENSION) || photocraft_format::is_pcraft(bytes) {

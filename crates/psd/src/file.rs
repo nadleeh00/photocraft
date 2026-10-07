@@ -132,6 +132,23 @@ impl PsdFile {
         Ok(PsdFile { header, color_mode_data, resources, layer_info, layer_info_placement, global_layer_mask, global_blocks, layer_mask_trailing, image_data })
     }
 
+    /// Bytes that decoding every layer channel and the merged image would produce, computed
+    /// from the stored rectangles without decoding anything. Lets a caller refuse a file
+    /// before its pixels are allocated. Embedded smart-object documents are not counted.
+    pub fn decoded_bytes(&self) -> Result<u64> {
+        let overflow = || PsdError::LimitExceeded("decoded size overflow");
+        let (depth, version) = (self.header.depth, self.header.version);
+        let mut total = ImageData::layout(&self.header).total_bytes()?;
+        for layer in self.layer_info.iter().flat_map(|info| &info.layers) {
+            for ch in &layer.channels {
+                let (width, height) = layer.channel_rect(ch.id).size()?;
+                let plane = crate::compression::PlaneLayout { planes: 1, width, height, depth, version }.total_bytes()?;
+                total = total.checked_add(plane).ok_or_else(overflow)?;
+            }
+        }
+        Ok(total)
+    }
+
     /// Serializes the file.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let v = self.header.version;

@@ -18,16 +18,22 @@ pub fn is_raw(bytes: &[u8]) -> bool {
 
 /// The decode limits shared with the flat codecs.
 fn limits() -> Limits {
-    let l = codecs::Limits::default();
+    raw_limits(&codecs::Limits::default())
+}
+
+/// `l` in `photocraft-raw`'s shape.
+pub(crate) fn raw_limits(l: &codecs::Limits) -> Limits {
     Limits { max_width: l.max_width, max_height: l.max_height, max_pixels: l.max_pixels, max_alloc: l.max_alloc }
 }
 
 /// A raw file's embedded JPEG preview, turned upright. Its own EXIF orientation wins when it
 /// has one; otherwise the raw's IFD0 orientation applies (TIFF-based raws record it there, and
 /// their previews are usually stored as the sensor reads out). Developed raws are oriented by
-/// `photocraft-raw` and carry no EXIF, so nothing is turned twice.
-fn upright_preview(raw: &[u8], jpeg: &[u8]) -> Result<Image, IoError> {
-    let img = codecs::decode_as_with(Format::Jpeg, jpeg, &codecs::DecodeOptions { keep_orientation: true, ..Default::default() })?;
+/// `photocraft-raw` and carry no EXIF, so nothing is turned twice. Decoded under `l`, the
+/// limits the raw itself was developed under.
+fn upright_preview(raw: &[u8], jpeg: &[u8], l: &Limits) -> Result<Image, IoError> {
+    let limits = codecs::Limits { max_width: l.max_width, max_height: l.max_height, max_pixels: l.max_pixels, max_alloc: l.max_alloc };
+    let img = codecs::decode_as_with(Format::Jpeg, jpeg, &codecs::DecodeOptions { limits, keep_orientation: true })?;
     let own = img.meta.exif.as_deref().map_or(1, codecs::exif_orientation);
     let o = if own != 1 { own } else { codecs::exif_orientation(raw) };
     Ok(img.oriented(o)?)
@@ -62,7 +68,7 @@ pub fn import_raw_with(name: &str, bytes: &[u8], opts: &DevelopOptions) -> Resul
         }
         Err(RawError::Unsupported(reason)) => match photocraft_raw::embedded_preview(bytes) {
             Some(p) => {
-                let img = upright_preview(bytes, p.jpeg)?;
+                let img = upright_preview(bytes, p.jpeg, &opts.limits)?;
                 let mut r = image_to_document(name, &img)?;
                 r.warnings.insert(
                     0,

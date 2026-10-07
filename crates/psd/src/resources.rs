@@ -1,8 +1,24 @@
 //! Image resources section (`8BIM` resource blocks).
 
+use std::sync::OnceLock;
+
 use crate::descriptor::UnicodeString;
 use crate::error::{PsdError, Result};
 use crate::io::{Reader, WriteExt, read_pascal, write_pascal};
+
+static APP_NAME: OnceLock<&'static str> = OnceLock::new();
+
+/// Sets, once per process, the application name written as the writer and reader of the version
+/// info resource (and by the engine's EPS and LUT writers). Returns `false` when a name was
+/// already set; the first name stays. Unset, output keeps the upstream values.
+pub fn set_app_name(name: &'static str) -> bool {
+    APP_NAME.set(name).is_ok()
+}
+
+/// The name passed to [`set_app_name`], if any.
+pub fn app_name() -> Option<&'static str> {
+    APP_NAME.get().copied()
+}
 
 /// Well-known resource ids.
 pub mod ids {
@@ -257,8 +273,8 @@ pub fn version_info_resource(has_real_merged_data: bool) -> ImageResource {
         VersionInfo {
             version: 1,
             has_real_merged_data,
-            writer: UnicodeString::new_nul("Adobe Photoshop"),
-            reader: UnicodeString::new_nul("Adobe Photoshop CS6"),
+            writer: UnicodeString::new_nul(app_name().unwrap_or("Adobe Photoshop")),
+            reader: UnicodeString::new_nul(app_name().unwrap_or("Adobe Photoshop CS6")),
             file_version: 1,
         }
         .to_bytes(),

@@ -15,7 +15,12 @@ const BAND_BYTES: usize = 32 << 20;
 
 /// Decodes a flat image into a single-layer document.
 pub fn import_flat(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
-    let img = codecs::decode(bytes)?;
+    import_flat_with(name, bytes, &codecs::Limits::default())
+}
+
+/// [`import_flat`] under explicit decode limits.
+pub(crate) fn import_flat_with(name: &str, bytes: &[u8], limits: &codecs::Limits) -> Result<ImportResult, IoError> {
+    let img = codecs::decode_with(bytes, &codecs::DecodeOptions { limits: *limits, ..Default::default() })?;
     let mut r = image_to_document(name, &img)?;
     // OpenEXR and Radiance HDR hold linear, scene-referred values (Rec. 709 primaries unless
     // stated otherwise): tag them linear sRGB so they display and convert correctly.
