@@ -96,7 +96,9 @@ fn box_rows(buf: &mut [f32], w: usize, n: usize, r: usize) {
     if r == 0 || w == 0 {
         return;
     }
-    let norm = 1.0 / (2 * r + 1) as f32;
+    // f64 sums: a row's result must not depend on where its window starts (tile independence),
+    // and f32 running sums drift by window-dependent amounts.
+    let norm = 1.0 / (2 * r + 1) as f64;
     let blur_row = |row: &mut [f32]| {
         // The row with clamped edges materialised (r + 1 pixels each side), so the running sum
         // reads without bounds clamping, all channels per step.
@@ -109,15 +111,15 @@ fn box_rows(buf: &mut [f32], w: usize, n: usize, r: usize) {
         for _ in 0..pad {
             src.extend_from_slice(&row[(w - 1) * n..w * n]);
         }
-        let mut acc = [0.0f32; 8];
+        let mut acc = [0.0f64; 8];
         let acc = &mut acc[..n.min(8)];
         if n > 8 {
             // Unusual channel counts: per channel.
             for c in 0..n {
-                let mut a: f32 = (0..=2 * r).map(|i| src[(pad - r + i) * n + c]).sum();
+                let mut a: f64 = (0..=2 * r).map(|i| src[(pad - r + i) * n + c] as f64).sum();
                 for x in 0..w {
-                    row[x * n + c] = a * norm;
-                    a += src[(x + pad + r + 1) * n + c] - src[(x + pad - r) * n + c];
+                    row[x * n + c] = (a * norm) as f32;
+                    a += src[(x + pad + r + 1) * n + c] as f64 - src[(x + pad - r) * n + c] as f64;
                 }
             }
             return;
@@ -125,14 +127,14 @@ fn box_rows(buf: &mut [f32], w: usize, n: usize, r: usize) {
         for i in 0..=2 * r {
             let o = (pad - r + i) * n;
             for c in 0..n {
-                acc[c] += src[o + c];
+                acc[c] += src[o + c] as f64;
             }
         }
         for x in 0..w {
             let (add, sub) = ((x + pad + r + 1) * n, (x + pad - r) * n);
             for c in 0..n {
-                row[x * n + c] = acc[c] * norm;
-                acc[c] += src[add + c] - src[sub + c];
+                row[x * n + c] = (acc[c] * norm) as f32;
+                acc[c] += src[add + c] as f64 - src[sub + c] as f64;
             }
         }
     };
@@ -175,9 +177,16 @@ fn transpose(buf: &[f32], w: usize, h: usize, n: usize) -> Vec<f32> {
 
 /// Gaussian blur by three box passes per axis over a premultiplied window.
 fn gaussian_boxes(src: &Image, out: Rect, alpha: bool, sigma: f32) -> Vec<f32> {
+    let radii: Vec<usize> = boxes_for_gauss(sigma, 3).iter().map(|w| (w - 1) / 2).collect();
+    box_passes(src, out, alpha, &radii)
+}
+
+/// One running-sum box pass of each radius in `radii`, per axis, over a premultiplied window.
+/// The window is `out` grown by the summed radii (+1) and filled from `src` (zero outside its
+/// rect, as `conv_sep` reads it), so the clamped window edges never reach `out`.
+fn box_passes(src: &Image, out: Rect, alpha: bool, radii: &[usize]) -> Vec<f32> {
     let n = src.ch;
-    let boxes = boxes_for_gauss(sigma, 3);
-    let margin: i32 = boxes.iter().map(|w| (*w as i32 - 1) / 2).sum::<i32>() + 1;
+    let margin: i32 = radii.iter().map(|r| *r as i32).sum::<i32>() + 1;
     let win = Rect::new(out.x0 - margin, out.y0 - margin, out.x1 + margin, out.y1 + margin);
     let (ww, wh) = (win.width() as usize, win.height() as usize);
     let mut p = vec![0.0f32; ww * wh * n];
@@ -197,12 +206,12 @@ fn gaussian_boxes(src: &Image, out: Rect, alpha: bool, sigma: f32) -> Vec<f32> {
     #[cfg(target_arch = "wasm32")]
     p.chunks_mut(ww * n).enumerate().for_each(|(y, row)| fill(y, row));
     premultiply(&mut p, n, alpha);
-    for w in &boxes {
-        box_rows(&mut p, ww, n, (w - 1) / 2);
+    for r in radii {
+        box_rows(&mut p, ww, n, *r);
     }
     let mut t = transpose(&p, ww, wh, n);
-    for w in &boxes {
-        box_rows(&mut t, wh, n, (w - 1) / 2);
+    for r in radii {
+        box_rows(&mut t, wh, n, *r);
     }
     let p = transpose(&t, wh, ww, n);
     let (ow, oh) = (out.width() as usize, out.height() as usize);
@@ -217,8 +226,7 @@ fn gaussian_boxes(src: &Image, out: Rect, alpha: bool, sigma: f32) -> Vec<f32> {
 
 pub(crate) fn boxed(src: &Image, out: Rect, ctx: &Ctx, radius: f32) -> Vec<f32> {
     let r = radius.max(0.0).round() as usize;
-    let k = vec![1.0 / (2 * r + 1) as f32; 2 * r + 1];
-    conv_sep(src, out, &k, &k, ctx.alpha)
+    box_passes(src, out, ctx.alpha, &[r])
 }
 
 fn average_samples(src: &Image, out: Rect, ctx: &Ctx, mut offsets: impl FnMut(f32, f32, &mut Vec<(f32, f32)>)) -> Vec<f32> {
@@ -338,7 +346,7 @@ pub(crate) fn surface(src: &Image, out: Rect, ctx: &Ctx, radius: f32, threshold:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -360,5 +368,42 @@ mod tests {
         let err = exact.iter().zip(&fast).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(err < 0.02, "max error {err}");
         assert_eq!(boxes_for_gauss(10.0, 3).len(), 3);
+    }
+
+    /// A textured two-channel (value, alpha) image.
+    pub(crate) fn textured(rect: Rect) -> Image {
+        let mut img = Image::new(rect, 2);
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let i = ((y - rect.y0) as usize * rect.width() as usize + (x - rect.x0) as usize) * 2;
+                img.data[i] = (((x * 7 + y * 13).rem_euclid(17)) as f32) / 16.0;
+                img.data[i + 1] = if (x + y).rem_euclid(11) == 0 { 0.25 } else { 1.0 };
+            }
+        }
+        img
+    }
+
+    pub(crate) fn test_ctx(bounds: Rect) -> Ctx {
+        Ctx { bounds, mode: photocraft_color::ColorMode::Grayscale, alpha: true }
+    }
+
+    #[test]
+    fn boxed_matches_conv_sep() {
+        // `out` reaches past the source rect, so the zero-outside edge handling is exercised.
+        let img = textured(Rect::new(0, 0, 90, 70));
+        let ctx = test_ctx(img.rect);
+        let mut worst = 0.0f32;
+        for out in [Rect::new(0, 0, 90, 70), Rect::new(-10, -10, 100, 80), Rect::new(30, 20, 60, 50)] {
+            for radius in [0.0, 1.0, 5.0, 17.0, 60.0] {
+                let r = radius as usize;
+                let k = vec![1.0 / (2 * r + 1) as f32; 2 * r + 1];
+                let old = conv_sep(&img, out, &k, &k, true);
+                let new = boxed(&img, out, &ctx, radius);
+                let err = old.iter().zip(&new).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+                worst = worst.max(err);
+                assert!(err < 1e-5, "radius {radius} out {out:?}: max error {err}");
+            }
+        }
+        eprintln!("boxed vs conv_sep worst error {worst}");
     }
 }
